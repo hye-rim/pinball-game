@@ -9,12 +9,12 @@
 const LOGIC_PINBALL = (() => {
 const W = 300, H = 520;
 const DT = 1 / 240;
-const GRAV = 900;                       // 아래로 가는 가속도 (칸/초²)
+const GRAV = 950;                       // 아래로 가는 가속도 (칸/초²)
 const BALL_R = 7;
 const MAX_SPEED = 1300;
 const BALLS = 3;
 const WALL_E = 0.5;                     // 벽에 튕길 때 남는 속도 비율
-const FLIP_LEN = 53, FLIP_R = 6;
+const FLIP_LEN = 50, FLIP_R = 6;
 const FLIP_REST = 0.49, FLIP_UP = -0.43;   // 라디안. 왼쪽 플리퍼 기준 (양수 = 오른쪽 아래를 가리킴). 오른쪽은 좌우 반대
 const FLIP_SPEED = 14;                  // 플리퍼가 도는 빠르기 (라디안/초)
 const PIVOT = [{ x: 88, y: 462 }, { x: 212, y: 462 }];
