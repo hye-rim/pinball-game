@@ -7,6 +7,7 @@ const tutorialSignal = (type) => window.dispatchEvent(new CustomEvent('arcade:tu
 const L = LOGIC_PINBALL;
 const $ = (id) => document.getElementById(id);
 const BEST_KEY = 'pinballBest';
+const PLUNGER_BASE = 514, PLUNGER_TRAVEL = 20;                // 스프링 받침 높이와 끝까지 당겼을 때 내려가는 거리 (그림만, 물리는 logic.js)
 const T = { over: 900 };                                    // 시간(ms). 시험용으로 줄일 수 있다
 
 // ---------- 저장소 ----------
@@ -82,10 +83,13 @@ function draw() {
   bg.addColorStop(0, '#1c4a6e'); bg.addColorStop(1, '#14304a');
   ctx.fillStyle = bg; ctx.fillRect(0, 0, L.W, L.H);
   // 발사 통로 바탕
-  ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(268, 150, 22, 330);
+  ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(268, 150, 22, PLUNGER_BASE - 150);
   // 벽
-  for (const w of L.WALLS) line(w[0], w[1], w[2], w[3], 5, '#c9d8ee');
-  for (const w of L.WALLS) line(w[0], w[1], w[2], w[3], 2, '#ffffff');
+  const walls = L.WALLS.filter((w) => !(w[1] === 480 && w[3] === 480 && w[0] === 268));        // 통로 바닥은 스프링이 내려갈 수 있게 아래로 늘려 그린다
+  for (const w of walls) line(w[0], w[1], w[2], w[3], 5, '#c9d8ee');
+  for (const w of walls) line(w[0], w[1], w[2], w[3], 2, '#ffffff');
+  for (const x of [268, 290]) { line(x, 480, x, PLUNGER_BASE, 5, '#c9d8ee'); line(x, 480, x, PLUNGER_BASE, 2, '#ffffff'); }
+  line(268, PLUNGER_BASE, 290, PLUNGER_BASE, 5, '#c9d8ee'); line(268, PLUNGER_BASE, 290, PLUNGER_BASE, 2, '#ffffff');
   // 슬링샷
   L.SLINGS.forEach((s, i) => { line(s.x1, s.y1, s.x2, s.y2, 8, st.hot.sling[i] > 0 ? '#ffd23f' : '#ff5fa2'); });
   // 타깃
@@ -105,18 +109,27 @@ function draw() {
     line(pv.x, pv.y, tip.x, tip.y, L.FLIP_R * 2, st.flip[s].up ? '#ffd23f' : '#ffffff');
     ctx.fillStyle = '#2b1d52'; ctx.beginPath(); ctx.arc(pv.x, pv.y, 3, 0, Math.PI * 2); ctx.fill();
   }
-  // 스프링 (당길수록 눌린다)
+  // 스프링: 당기는 동안 머리(공이 놓인 판)가 아래로 내려가며 코일이 촘촘하게 눌리고 색이 초록 → 노랑 → 빨강으로 변한다
   const pull = st.phase === 'ready' ? st.pull.power : 0;
-  const top = L.LANE_BOTTOM + L.BALL_R + 2 + pull * 14;
-  ctx.strokeStyle = '#c9d8ee'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(L.LANE_X - 6, top);
-  for (let i = 0; i < 6; i++) ctx.lineTo(L.LANE_X + (i % 2 ? 6 : -6), top + (478 - top) * ((i + 1) / 6));
-  ctx.stroke();
-  line(L.LANE_X - 8, top, L.LANE_X + 8, top, 4, '#ff5fa2');
+  const headY = L.LANE_BOTTOM + L.BALL_R + 3 + pull * PLUNGER_TRAVEL;               // 공 바로 밑
+  const springTop = headY + 4, springBottom = PLUNGER_BASE - 3;
+  const hue = 130 - 130 * pull;                                                    // 초록(130) → 빨강(0)
+  const col = `hsl(${hue}, 85%, 52%)`;
+  const coils = 9, amp = 8.5;
+  ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(L.LANE_X, springTop);
+  for (let i = 0; i < coils; i++) ctx.lineTo(L.LANE_X + (i % 2 ? amp : -amp), springTop + (springBottom - springTop) * ((i + 0.5) / coils));
+  ctx.lineTo(L.LANE_X, springBottom);
+  ctx.strokeStyle = '#2b1d52'; ctx.lineWidth = 6; ctx.stroke();
+  ctx.strokeStyle = col; ctx.lineWidth = 3.2; ctx.stroke();
+  ctx.lineJoin = 'miter';
+  line(L.LANE_X - 10, headY, L.LANE_X + 10, headY, 8, '#2b1d52');                  // 스프링 머리
+  line(L.LANE_X - 10, headY, L.LANE_X + 10, headY, 4.5, col);
+  line(L.LANE_X - 10, PLUNGER_BASE - 2, L.LANE_X + 10, PLUNGER_BASE - 2, 5, '#c9d8ee');   // 받침
   // 공
   const b = st.ball;
   if (st.phase !== 'over') {
-    const y = st.phase === 'ready' ? b.y + pull * 14 : b.y;
+    const y = st.phase === 'ready' ? b.y + pull * PLUNGER_TRAVEL : b.y;
     const g = ctx.createRadialGradient(b.x - 2, y - 2, 1, b.x, y, L.BALL_R);
     g.addColorStop(0, '#ffffff'); g.addColorStop(1, '#9aa7bb');
     ctx.fillStyle = g; ctx.beginPath(); ctx.arc(b.x, y, L.BALL_R, 0, Math.PI * 2); ctx.fill();
