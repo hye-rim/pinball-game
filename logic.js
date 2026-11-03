@@ -5,6 +5,7 @@
 // - 세로로 긴 판 W x H (왼쪽 위가 0,0, 아래로 갈수록 y 가 커진다). 판은 기울어 있어 공이 늘 아래로 굴러 내려온다 (중력)
 // - 오른쪽 길쭉한 통로(발사 통로) 맨 아래에서 스프링을 당겼다 놓으면 공이 위로 쏘아 올라가 판으로 들어온다
 // - 왼쪽·오른쪽 플리퍼로 공을 쳐 올린다. 범퍼·슬링샷·타깃에 맞으면 점수. 공은 BALLS 개이고 아래 구멍으로 빠지면 하나 잃는다
+// - 테이블 2(미션 테이블)에서는 범퍼 배치가 다르고, 미션을 깨면 점수나 멀티볼(추가 공)을 받는다. 추가 공이 빠져도 공은 안 줄고, 메인 공이 빠지면 남은 공이 이어받는다
 // - 모든 움직임은 아주 짧은 고정 시간 DT 단위로 계산한다 (플리퍼가 빨라도 공이 뚫고 지나가지 않게). 같은 입력이면 같은 결과
 const LOGIC_PINBALL = (() => {
 const W = 300, H = 520;
@@ -20,9 +21,25 @@ const FLIP_SPEED = 14;                  // 플리퍼가 도는 빠르기 (라디
 const PIVOT = [{ x: 88, y: 462 }, { x: 212, y: 462 }];
 const LANE_X = 279, LANE_BOTTOM = 462;  // 발사 통로 가운데와 공이 놓이는 높이
 const LAUNCH_MIN = 800, LAUNCH_MAX = 1150;
-const BUMPERS = [{ x: 105, y: 150, r: 17 }, { x: 195, y: 150, r: 17 }, { x: 150, y: 218, r: 17 }];
-const BUMPER_KICK = 380;
 const TARGETS = [{ x1: 96, y1: 64, x2: 124, y2: 64 }, { x1: 136, y1: 64, x2: 164, y2: 64 }, { x1: 176, y1: 64, x2: 204, y2: 64 }];
+// 테이블: 0 = 클래식(원래 판), 1 = 미션 테이블(범퍼 5개 + 미션). 슬링샷·플리퍼·벽은 같다
+// 범퍼는 타깃·벽에서 공 한 개가 들어갈 틈(공 지름 + 여유)보다 더 떨어뜨려야 한다: 범퍼와 타깃 사이 좁은 틈에 공이 끼면 범퍼가 위로 차고 타깃이 아래로 튕기는 점수 놀이터가 된다
+const TABLES = [
+  { name: '클래식', missions: false, bumpers: [{ x: 105, y: 150, r: 17 }, { x: 195, y: 150, r: 17 }, { x: 150, y: 218, r: 17 }], targets: TARGETS },
+  { name: '미션 테이블', missions: true, bumpers: [{ x: 86, y: 160, r: 15 }, { x: 214, y: 160, r: 15 }, { x: 150, y: 136, r: 15 }, { x: 108, y: 225, r: 15 }, { x: 192, y: 225, r: 15 }], targets: TARGETS },
+];
+const BUMPERS = TABLES[0].bumpers;
+const BUMPER_KICK = 380;
+const MAX_EXTRA = 3;                    // 추가 공은 동시에 이만큼까지
+
+// 미션 (미션 테이블): 위에서부터 차례로 하나씩. 한 바퀴 돌면 목표가 커진다. reward: 점수(배수 적용) 또는 멀티볼(추가 공)
+const MISSIONS = [
+  { id: 'bumper', text: '범퍼를 맞혀요', goal: 18, reward: { pts: 3000 } },
+  { id: 'target', text: '초록 타깃 3개를 모두 켜요', goal: 1, reward: { balls: 1 } },
+  { id: 'sling', text: '슬링샷을 맞혀요', goal: 12, reward: { pts: 4000 } },
+  { id: 'flip', text: '플리퍼로 공을 쳐올려요', goal: 22, reward: { balls: 1 } },
+];
+const goalOf = (m, round) => (m.id === 'target' ? 1 + Math.floor(round / 2) : Math.ceil(m.goal * (1 + 0.4 * round)));
 const SLINGS = [[10, 335, 72, 402], [268, 335, 198, 402]].map(([x1, y1, x2, y2]) => {   // 벽에서 비스듬히 내려오는 삼각형 모양 (공이 뒤로 못 들어간다)
   const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy);
   let nx = dy / len, ny = -dx / len;                       // 선분에 수직인 방향 중 위쪽을 보는 쪽
@@ -53,14 +70,17 @@ const WALLS = (() => {
   return w;
 })();
 
-function newGame() {
+function newGame(opts = {}) {
+  const table = opts.table === 1 ? 1 : 0, tb = TABLES[table];
   const st = {
+    table, bumpers: tb.bumpers, targets: tb.targets, extra: [],
+    mission: tb.missions ? { i: 0, round: 0, progress: 0, done: 0 } : null, multis: 0,
     score: 0, mult: 1, ballsLeft: BALLS, phase: 'ready',             // ready (공이 발사 통로에서 대기) · play · over
     ball: { x: LANE_X, y: LANE_BOTTOM, vx: 0, vy: 0 },
     flip: [{ angle: FLIP_REST, up: false, omega: 0 }, { angle: FLIP_REST, up: false, omega: 0 }],
     pull: { on: false, power: 0 },
     lit: [false, false, false],
-    hot: { bumper: [0, 0, 0], target: [0, 0, 0], sling: [0, 0] },       // 방금 맞은 효과 (남은 시간, 화면용)
+    hot: { bumper: tb.bumpers.map(() => 0), target: [0, 0, 0], sling: [0, 0] },       // 방금 맞은 효과 (남은 시간, 화면용)
     events: [], time: 0, acc: 0, stall: 0, ballNo: 1,
   };
   return st;
@@ -93,6 +113,41 @@ const tipOf = (side, angle) => {
 };
 function gain(st, pts) { st.score += pts * st.mult; }
 
+// 추가 공을 위에서 떨어뜨린다 (움직임은 결정적: 같은 입력이면 같은 결과)
+function spawnExtra(st, n) {
+  let made = 0;
+  for (let k = 0; k < n && st.extra.length < MAX_EXTRA; k++) {
+    // 오른쪽 위에서 왼쪽으로: 메인 공이 발사 통로를 돌아 들어오는 것과 같은 길 (타깃 바로 위에서 떨어뜨리면 타깃에 올라앉는다)
+    const h = Math.abs(Math.sin((st.time + k + st.multis * 7.31) * 12.9898) * 43758.5453) % 1;
+    st.extra.push({ x: 205 + h * 30, y: 24, vx: -(200 + h * 120), vy: 20, stall: 0 });
+    made++;
+  }
+  if (made) st.multis++;
+  return made;
+}
+const missionInfo = (st) => {
+  if (!st.mission) return null;
+  const m = MISSIONS[st.mission.i];
+  return { id: m.id, text: m.text, progress: st.mission.progress, goal: goalOf(m, st.mission.round), reward: m.reward, done: st.mission.done };
+};
+function missionHit(st, id) {
+  const ms = st.mission;
+  if (!ms) return;
+  const m = MISSIONS[ms.i];
+  if (m.id !== id) return;
+  ms.progress++;
+  const goal = goalOf(m, ms.round);
+  if (ms.progress < goal) { st.events.push({ type: 'mission', progress: ms.progress, goal }); return; }
+  let balls = 0;
+  if (m.reward.pts) gain(st, m.reward.pts);
+  if (m.reward.balls) balls = spawnExtra(st, m.reward.balls);
+  ms.done++;
+  st.events.push({ type: 'missionDone', id: m.id, pts: m.reward.pts || 0, balls });
+  ms.i = (ms.i + 1) % MISSIONS.length;
+  if (ms.i === 0) ms.round++;
+  ms.progress = 0;
+}
+
 function setFlipper(st, side, up) { st.flip[side].up = !!up; }
 function holdPlunger(st, on) {
   if (on) { st.pull.on = true; return; }
@@ -123,13 +178,40 @@ function step(st, dt = DT) {
   if (st.pull.on && st.phase === 'ready') st.pull.power = Math.min(1, st.pull.power + dt / 1.0);
   for (const k of ['bumper', 'target', 'sling']) st.hot[k] = st.hot[k].map((v) => Math.max(0, v - dt));
   if (st.phase === 'ready') return;
+  // 추가 공 (멀티볼): 빠지거나 발사 통로에 갇히면 그냥 사라진다 — 공이 줄지는 않는다
+  for (let n = st.extra.length - 1; n >= 0; n--) {
+    const e = st.extra[n];
+    const esp = physics(st, e, dt);
+    // 추가 공도 오래 멈춰 있으면 흔들어 준다 (타깃 위 같은 곳에 올라앉을 수 있다)
+    if (esp < 25 && !(e.y > 440 && e.x > 80 && e.x < 220) && e.x < 268) e.stall = (e.stall || 0) + dt; else e.stall = 0;
+    if (e.stall > STALL_SECONDS) { e.vx += (Math.abs(Math.sin((st.time + n) * 12.9898) * 43758.5453) % 1 - 0.5) * 300; e.vy -= 200; e.stall = 0; st.events.push({ type: 'nudge' }); }
+    if (e.y > H + BALL_R || (e.x > 268 && e.y > 440 && Math.hypot(e.vx, e.vy) < 40)) { st.extra.splice(n, 1); st.events.push({ type: 'extraLost' }); }
+  }
   const b = st.ball;
+  const sp = physics(st, b, dt);
+  // 오래 멈춰 있으면 살짝 흔들어 준다 (플리퍼 위에서 가만히 있는 건 괜찮다)
+  const onFlipper = b.y > 440 && b.x > 80 && b.x < 220;
+  if (sp < 25 && !onFlipper && b.x < 268) st.stall += dt; else st.stall = 0;
+  if (st.stall > STALL_SECONDS) { b.vx += (Math.abs(Math.sin(st.time * 12.9898) * 43758.5453) % 1 - 0.5) * 300; b.vy -= 200; st.stall = 0; st.events.push({ type: 'nudge' }); }
+  // 약하게 쏴서 발사 통로로 도로 떨어졌으면 다시 쏠 수 있게 대기 상태로 (추가 공이 남아 있으면 그 공이 이어받는다)
+  if (b.x > 268 && b.y > 440 && sp < 40) {
+    if (st.extra.length) { promote(st); return; }
+    st.phase = 'ready'; st.ball = { x: LANE_X, y: LANE_BOTTOM, vx: 0, vy: 0 }; st.pull = { on: false, power: 0 };
+    st.events.push({ type: 'relaunch' });
+    return;
+  }
+  // 아래 구멍
+  if (b.y > H + BALL_R) drain(st);
+}
+
+// 공 하나의 물리 (벽·범퍼·슬링샷·타깃·플리퍼). 공의 속력을 돌려준다
+function physics(st, b, dt) {
   b.vy += GRAV * dt;
   b.x += b.vx * dt; b.y += b.vy * dt;
   b.vx *= 1 - 0.02 * dt; b.vy *= 1 - 0.02 * dt;
   for (const w of WALLS) hitSegment(b, w[0], w[1], w[2], w[3], BALL_R, WALL_E);
   // 범퍼
-  BUMPERS.forEach((bp, i) => {
+  st.bumpers.forEach((bp, i) => {
     let nx = b.x - bp.x, ny = b.y - bp.y;
     const d = Math.hypot(nx, ny), min = bp.r + BALL_R;
     if (d >= min) return;
@@ -139,14 +221,15 @@ function step(st, dt = DT) {
     if (vn < 0) { b.vx -= 2 * vn * nx; b.vy -= 2 * vn * ny; }
     b.vx += nx * BUMPER_KICK; b.vy += ny * BUMPER_KICK;
     st.hot.bumper[i] = 0.18; gain(st, 100); st.events.push({ type: 'bumper', i });
+    missionHit(st, 'bumper');
   });
   // 슬링샷
   SLINGS.forEach((sl, i) => {
     const hit = hitSegment(b, sl.x1, sl.y1, sl.x2, sl.y2, BALL_R, 0.3);
-    if (hit > 300 && lastNx * sl.nx + lastNy * sl.ny > 0.5 && st.hot.sling[i] <= 0) { b.vx += sl.nx * SLING_KICK; b.vy += sl.ny * SLING_KICK; st.hot.sling[i] = 0.15; gain(st, 10); st.events.push({ type: 'sling', i }); }
+    if (hit > 300 && lastNx * sl.nx + lastNy * sl.ny > 0.5 && st.hot.sling[i] <= 0) { b.vx += sl.nx * SLING_KICK; b.vy += sl.ny * SLING_KICK; st.hot.sling[i] = 0.15; gain(st, 10); st.events.push({ type: 'sling', i }); missionHit(st, 'sling'); }
   });
   // 타깃
-  TARGETS.forEach((tg, i) => {
+  st.targets.forEach((tg, i) => {
     const hit = hitSegment(b, tg.x1, tg.y1, tg.x2, tg.y2, BALL_R + 3, 0.6);
     if (hit > 40) {
       st.hot.target[i] = 0.2;
@@ -155,6 +238,7 @@ function step(st, dt = DT) {
         st.lit = [false, false, false]; gain(st, 2000);
         st.mult = Math.min(5, st.mult + 1);
         st.events.push({ type: 'bonus', mult: st.mult });
+        missionHit(st, 'target');
       }
     }
   });
@@ -163,25 +247,22 @@ function step(st, dt = DT) {
     const f = st.flip[s], pv = PIVOT[s], tip = tipOf(s, f.angle);
     const surf = (qx, qy) => ({ x: -f.omega * (qy - pv.y) * (s === 0 ? 1 : -1), y: f.omega * (qx - pv.x) * (s === 0 ? 1 : -1) });
     const hit = hitSegment(b, pv.x, pv.y, tip.x, tip.y, BALL_R + FLIP_R, 0.45, 0, 0, surf);
-    if (hit > 120) st.events.push({ type: 'flip', side: s, speed: hit });
+    if (hit > 120) { st.events.push({ type: 'flip', side: s, speed: hit }); missionHit(st, 'flip'); }
   }
   const sp = Math.hypot(b.vx, b.vy);
   if (sp > MAX_SPEED) { b.vx *= MAX_SPEED / sp; b.vy *= MAX_SPEED / sp; }
-  // 오래 멈춰 있으면 살짝 흔들어 준다 (플리퍼 위에서 가만히 있는 건 괜찮다)
-  const onFlipper = b.y > 440 && b.x > 80 && b.x < 220;
-  if (sp < 25 && !onFlipper && b.x < 268) st.stall += dt; else st.stall = 0;
-  if (st.stall > STALL_SECONDS) { b.vx += (Math.abs(Math.sin(st.time * 12.9898) * 43758.5453) % 1 - 0.5) * 300; b.vy -= 200; st.stall = 0; st.events.push({ type: 'nudge' }); }
-  // 약하게 쏴서 발사 통로로 도로 떨어졌으면 다시 쏠 수 있게 대기 상태로
-  if (b.x > 268 && b.y > 440 && sp < 40) {
-    st.phase = 'ready'; st.ball = { x: LANE_X, y: LANE_BOTTOM, vx: 0, vy: 0 }; st.pull = { on: false, power: 0 };
-    st.events.push({ type: 'relaunch' });
-    return;
-  }
-  // 아래 구멍
-  if (b.y > H + BALL_R) drain(st);
+  return sp;
+}
+
+// 메인 공이 사라졌을 때 추가 공 하나가 메인이 된다 (공은 줄지 않는다)
+function promote(st) {
+  st.ball = st.extra.shift();
+  st.stall = 0;
+  st.events.push({ type: 'promote' });
 }
 
 function drain(st) {
+  if (st.extra.length) { promote(st); return; }                      // 다른 공이 남아 있으면 이어서 계속
   st.events.push({ type: 'drain' });
   st.ballsLeft--;
   if (st.ballsLeft <= 0) { st.phase = 'over'; st.events.push({ type: 'over' }); return; }
@@ -197,6 +278,7 @@ function update(st, seconds) {
   while (st.acc >= DT) { step(st, DT); st.acc -= DT; if (st.phase === 'over') { st.acc = 0; break; } }
 }
 
-return { W, H, DT, GRAV, BALL_R, BALLS, FLIP_LEN, FLIP_R, FLIP_REST, FLIP_UP, PIVOT, LANE_X, LANE_BOTTOM, BUMPERS, TARGETS, SLINGS, WALLS, LAUNCH_MIN, LAUNCH_MAX, MAX_SPEED, newGame, setFlipper, holdPlunger, step, update, tipOf };
+return { W, H, DT, GRAV, BALL_R, BALLS, FLIP_LEN, FLIP_R, FLIP_REST, FLIP_UP, PIVOT, LANE_X, LANE_BOTTOM, BUMPERS, TARGETS, SLINGS, WALLS, LAUNCH_MIN, LAUNCH_MAX, MAX_SPEED, newGame, setFlipper, holdPlunger, step, update, tipOf,
+  TABLES, MISSIONS, MAX_EXTRA, goalOf, missionInfo, missionHit, spawnExtra, promote };
 })();
 if (typeof module !== 'undefined') module.exports = LOGIC_PINBALL;

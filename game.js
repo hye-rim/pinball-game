@@ -6,7 +6,7 @@ const tutorialSignal = (type) => window.dispatchEvent(new CustomEvent('arcade:tu
 (() => {
 const L = LOGIC_PINBALL;
 const $ = (id) => document.getElementById(id);
-const BEST_KEY = 'pinballBest';
+const BEST_KEY = ['pinballBest', 'pinballMissionBest'];            // 클래식 · 미션 테이블 (클래식 기록은 로비에 보이는 그대로)
 const PLUNGER_BASE = 514, PLUNGER_TRAVEL = 20;                // 스프링 받침 높이와 끝까지 당겼을 때 내려가는 거리 (그림만, 물리는 logic.js)
 const T = { over: 900 };                                    // 시간(ms). 시험용으로 줄일 수 있다
 
@@ -15,7 +15,8 @@ const store = {
   get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
 };
-let best = Number(store.get(BEST_KEY)) || 0;
+const bests = [Number(store.get(BEST_KEY[0])) || 0, Number(store.get(BEST_KEY[1])) || 0];
+const bestOf = () => bests[st.table] || 0;
 
 // ---------- 소리 ----------
 let audio = null;
@@ -49,6 +50,10 @@ const sfx = {
   drain: () => seq([330, 262, 196], 140, 'sawtooth', 0.06),
   over: () => seq([392, 330, 262, 196], 150, 'sawtooth', 0.06),
   record: () => seq([523, 659, 784, 1047], 110, 'triangle', 0.1),
+  mission: () => { if (quiet(60)) return; tone(880, 0.06, 'triangle', 0.06, 200); },
+  missionDone: () => seq([523, 659, 784, 1047, 1319], 80, 'triangle', 0.1),
+  multi: () => seq([392, 523, 659, 784], 100, 'square', 0.07),
+  promote: () => seq([660, 880], 80, 'triangle', 0.08),
 };
 function toggleMute() { muted = !muted; store.set('pinballMuted', muted ? '1' : '0'); $('muteBtn').textContent = muted ? '🔇' : '🔊'; }
 $('muteBtn').onclick = (e) => { e.currentTarget.blur(); toggleMute(); };
@@ -93,9 +98,9 @@ function draw() {
   // 슬링샷
   L.SLINGS.forEach((s, i) => { line(s.x1, s.y1, s.x2, s.y2, 8, st.hot.sling[i] > 0 ? '#ffd23f' : '#ff5fa2'); });
   // 타깃
-  L.TARGETS.forEach((t, i) => { line(t.x1, t.y1, t.x2, t.y2, 8, st.hot.target[i] > 0 ? '#ffffff' : st.lit[i] ? '#ffd23f' : '#4cd964'); });
+  st.targets.forEach((t, i) => { line(t.x1, t.y1, t.x2, t.y2, 8, st.hot.target[i] > 0 ? '#ffffff' : st.lit[i] ? '#ffd23f' : '#4cd964'); });
   // 범퍼
-  L.BUMPERS.forEach((b, i) => {
+  st.bumpers.forEach((b, i) => {
     const on = st.hot.bumper[i] > 0;
     ctx.fillStyle = on ? '#ffd23f' : '#ff5a4f'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r + (on ? 3 : 0), 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#2b1d52'; ctx.lineWidth = 3; ctx.stroke();
@@ -126,6 +131,13 @@ function draw() {
   line(L.LANE_X - 10, headY, L.LANE_X + 10, headY, 8, '#2b1d52');                  // 스프링 머리
   line(L.LANE_X - 10, headY, L.LANE_X + 10, headY, 4.5, col);
   line(L.LANE_X - 10, PLUNGER_BASE - 2, L.LANE_X + 10, PLUNGER_BASE - 2, 5, '#c9d8ee');   // 받침
+  // 추가 공 (멀티볼): 메인 공과 같은 모양, 살짝 노란 빛
+  for (const e of st.extra) {
+    const g = ctx.createRadialGradient(e.x - 2, e.y - 2, 1, e.x, e.y, L.BALL_R);
+    g.addColorStop(0, '#fffbe0'); g.addColorStop(1, '#e0b43a');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(e.x, e.y, L.BALL_R, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#2b1d52'; ctx.lineWidth = 1.5; ctx.stroke();
+  }
   // 공
   const b = st.ball;
   if (st.phase !== 'over') {
@@ -140,6 +152,9 @@ function draw() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   if (phase === 'play' && st.phase === 'ready') text(pulledOnce ? '놓으면 발사!' : '🚀 발사를 꾹 눌렀다 놓아요', cw / 2, chh * 0.62, 13 * dpr);
   if (st.mult > 1) text(`x${st.mult}`, cw * 0.5, chh * 0.5, 22 * dpr);
+  // 미션 테이블: 지금 미션과 진행 (판 맨 위, 타깃 위쪽 빈 곳)
+  const mi = L.missionInfo(st);
+  if (mi && phase === 'play') text(`🎯 ${mi.text} ${mi.progress}/${mi.goal}`, cw / 2, chh * 0.047, 10.5 * dpr);
 }
 function text(s, x, y, size) {
   ctx.font = `${size}px Jua, sans-serif`;
@@ -148,8 +163,8 @@ function text(s, x, y, size) {
 }
 function renderHud() {
   $('score').textContent = st.score.toLocaleString('ko-KR');
-  $('balls').textContent = String(Math.max(0, st.ballsLeft));
-  $('best').textContent = Math.max(best, st.score).toLocaleString('ko-KR');
+  $('balls').textContent = String(Math.max(0, st.ballsLeft)) + (st.extra.length ? `+${st.extra.length}` : '');
+  $('best').textContent = Math.max(bestOf(), st.score).toLocaleString('ko-KR');
 }
 function say(t) { $('msg').textContent = t; }
 
@@ -199,10 +214,10 @@ const canvasUp = (e) => { const m = canvas._hold; if (!m || !m.has(e.pointerId))
 canvas.addEventListener('pointerup', canvasUp); canvas.addEventListener('pointercancel', canvasUp); canvas.addEventListener('lostpointercapture', canvasUp);
 
 // ---------- 흐름 ----------
-function startGame() {
+function startGame(table = 0) {
   clearTimeout(overTimer);
-  st = L.newGame(); phase = 'play'; pulledOnce = false;
-  hideOverlay(); say('🚀 발사 버튼을 꾹 눌렀다 놓으면 공이 나가요!\n◀ ▶ (또는 화면 왼쪽·오른쪽)으로 플리퍼를 올려요');
+  st = L.newGame({ table }); phase = 'play'; pulledOnce = false;
+  hideOverlay(); say(table === 1 ? '🎯 미션을 깨면 보너스! 타깃 미션을 깨면 🎱 멀티볼이 나와요\n🚀 발사 버튼을 꾹 눌렀다 놓아요' : '🚀 발사 버튼을 꾹 눌렀다 놓으면 공이 나가요!\n◀ ▶ (또는 화면 왼쪽·오른쪽)으로 플리퍼를 올려요');
   renderHud(); draw();
 }
 function onEvents() {
@@ -215,18 +230,26 @@ function onEvents() {
     else if (e.type === 'flip') sfx.flip(e.speed);
     else if (e.type === 'drain') { sfx.drain(); if (st.ballsLeft > 0) say(`공이 빠졌어요! 남은 공 ${st.ballsLeft}개`); }
     else if (e.type === 'relaunch') say('공이 다시 내려왔어요. 더 세게 쏴요!');
+    else if (e.type === 'mission') sfx.mission();
+    else if (e.type === 'missionDone') {
+      sfx.missionDone(); tutorialSignal('mission');
+      say(`🎯 미션 성공!${e.pts ? ` +${(e.pts * st.mult).toLocaleString('ko-KR')}점` : ''}${e.balls ? ' 🎱 멀티볼!' : ''}\n다음: ${L.missionInfo(st).text}`);
+      if (e.balls) setTimeout(sfx.multi, 250);
+    }
+    else if (e.type === 'promote') { sfx.promote(); say('🎱 다른 공이 이어받았어요! (공은 줄지 않았어요)'); }
     else if (e.type === 'over') { phase = 'over'; overTimer = setTimeout(showOver, T.over); }
   }
   st.events.length = 0;
 }
 function showOver() {
-  const record = st.score > best;
-  if (record) { best = st.score; store.set(BEST_KEY, String(best)); sfx.record(); } else sfx.over();
+  const t = st.table;
+  const record = st.score > bests[t];
+  if (record) { bests[t] = st.score; store.set(BEST_KEY[t], String(bests[t])); sfx.record(); } else sfx.over();
   showOverlay(`
     <h2>${record ? '🏆 최고 기록!' : '게임 끝!'}</h2>
     <div class="big">${st.score.toLocaleString('ko-KR')}</div>
-    <p>최고 기록 <b>${best.toLocaleString('ko-KR')}</b>점 · 점수 배수 최고 x${st.mult}</p>
-    <div class="col"><button data-act="again">다시 하기</button></div>`);
+    <p>${t === 1 ? '🎯 미션 테이블 · ' : ''}최고 기록 <b>${bests[t].toLocaleString('ko-KR')}</b>점 · 점수 배수 최고 x${st.mult}${st.mission ? ` · 미션 ${st.mission.done}개 성공` : ''}</p>
+    <div class="col"><button data-act="again">다시 하기</button><button class="sub" data-act="other">${t === 1 ? '클래식 테이블로' : '🎯 미션 테이블로'}</button></div>`);
   renderHud();
 }
 function showTitle() {
@@ -236,14 +259,18 @@ function showTitle() {
     <p>공을 튕겨 <b>점수</b>를 모아요!</p>
     <div class="card2" style="font-size:13px">🚀 발사 버튼을 <b>꾹 눌렀다 놓으면</b> 공이 나가요<br>◀ ▶ 버튼(또는 화면 <b>왼쪽·오른쪽</b>)으로 <b>플리퍼</b>를 올려 공을 쳐요<br>빨간 <b>범퍼</b>·분홍 <b>슬링샷</b>·초록 <b>타깃</b> 세 개를 모두 켜면 점수 배수 UP!<br>공 ${L.BALLS}개를 다 잃으면 끝이에요</div>
     <p style="font-size:12.5px">키보드: Z · / 플리퍼 · 스페이스 발사 · M 소리</p>
-    ${best ? `<span class="tag">최고 ${best.toLocaleString('ko-KR')}점</span>` : ''}
-    <div class="col"><button data-act="start">시작하기</button></div>`);
+    ${bests[0] ? `<span class="tag">클래식 최고 ${bests[0].toLocaleString('ko-KR')}점</span>` : ''}
+    <div class="col"><button data-act="start">시작하기</button><button class="sub" data-act="start2">🎯 미션 테이블<small>범퍼 5개 · 미션 · 멀티볼${bests[1] ? ` · 최고 ${bests[1].toLocaleString('ko-KR')}` : ''}</small></button></div>`);
 }
 $('overlay').addEventListener('click', (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
   btn.blur();
-  if (btn.dataset.act === 'start' || btn.dataset.act === 'again') startGame();
+  const act = btn.dataset.act;
+  if (act === 'start') startGame(0);
+  else if (act === 'start2') startGame(1);
+  else if (act === 'again') startGame(st.table);
+  else if (act === 'other') startGame(1 - st.table);
 });
 
 // ---------- 매 프레임 ----------

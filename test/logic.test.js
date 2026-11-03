@@ -175,3 +175,190 @@ test('update runs fixed steps and caps a long pause', () => {
   for (let i = 0; i < 8; i++) L.step(b);
   assert.ok(Math.abs(a.ball.y - b.ball.y) < 1e-6);
 });
+
+// ---------- 테이블 2 (미션 테이블)·미션·멀티볼 ----------
+function missionPlay(table = 1) { const st = L.newGame({ table }); st.phase = 'play'; st.ball = { x: 150, y: 300, vx: 0, vy: 0 }; return st; }
+const evs = (st, type) => st.events.filter((e) => e.type === type);
+
+test('table 0 is the original table; table 1 has five bumpers and missions', () => {
+  const a = L.newGame(), b = L.newGame({ table: 1 });
+  assert.strictEqual(a.table, 0);
+  assert.strictEqual(a.bumpers, L.BUMPERS);
+  assert.strictEqual(a.bumpers.length, 3);
+  assert.strictEqual(a.mission, null, 'no missions on the classic table');
+  assert.strictEqual(b.table, 1);
+  assert.strictEqual(b.bumpers.length, 5);
+  assert.ok(b.mission && b.mission.i === 0);
+  assert.strictEqual(b.hot.bumper.length, 5);
+  assert.strictEqual(L.newGame({ table: 7 }).table, 0, 'unknown table falls back to the classic one');
+});
+
+// 점 (px,py) 에서 선분까지 거리
+const distToSeg = (px, py, x1, y1, x2, y2) => {
+  const dx = x2 - x1, dy = y2 - y1, len2 = dx * dx + dy * dy;
+  const t = len2 ? Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / len2)) : 0;
+  return Math.hypot(px - (x1 + dx * t), py - (y1 + dy * t));
+};
+// 범퍼 가장자리와 다른 물체 사이 틈이 이 값보다 좁으면 공이 끼어 범퍼·타깃 사이를 튕겨 다니며 점수를 번다
+const MIN_POCKET = L.BALL_R * 2 + 24;
+
+test('bumpers on both tables leave no pocket where the ball can bounce between a bumper and a wall, target or another bumper', () => {
+  for (const tb of L.TABLES) {
+    const bps = tb.bumpers;
+    for (let i = 0; i < bps.length; i++) {
+      for (let j = i + 1; j < bps.length; j++) {
+        const gap = Math.hypot(bps[i].x - bps[j].x, bps[i].y - bps[j].y) - bps[i].r - bps[j].r;
+        assert.ok(gap > MIN_POCKET, `table ${L.TABLES.indexOf(tb)}: bumpers ${i} and ${j} are ${gap.toFixed(1)} apart`);
+      }
+      for (const w of L.WALLS) {
+        const gap = distToSeg(bps[i].x, bps[i].y, w[0], w[1], w[2], w[3]) - bps[i].r;
+        assert.ok(gap > MIN_POCKET, `table ${L.TABLES.indexOf(tb)}: bumper ${i} is ${gap.toFixed(1)} from a wall`);
+      }
+      for (const tg of tb.targets) {
+        const gap = distToSeg(bps[i].x, bps[i].y, tg.x1, tg.y1, tg.x2, tg.y2) - bps[i].r;
+        assert.ok(gap > MIN_POCKET, `table ${L.TABLES.indexOf(tb)}: bumper ${i} is ${gap.toFixed(1)} from a target`);
+      }
+      for (const sl of L.SLINGS) {
+        const gap = distToSeg(bps[i].x, bps[i].y, sl.x1, sl.y1, sl.x2, sl.y2) - bps[i].r;
+        assert.ok(gap > MIN_POCKET, `table ${L.TABLES.indexOf(tb)}: bumper ${i} is ${gap.toFixed(1)} from a slingshot`);
+      }
+    }
+  }
+});
+
+test('bumper hits count toward the first mission; finishing it pays the reward and starts the next', () => {
+  const st = missionPlay();
+  const goal = L.missionInfo(st).goal;
+  assert.strictEqual(L.missionInfo(st).id, 'bumper');
+  st.mission.progress = goal - 1;
+  const bp = st.bumpers[1];
+  st.ball = { x: bp.x, y: bp.y - bp.r - L.BALL_R - 2, vx: 0, vy: 200 };
+  for (let i = 0; i < 20; i++) L.step(st);
+  const done = evs(st, 'missionDone');
+  assert.strictEqual(done.length, 1);
+  assert.strictEqual(done[0].pts, 3000);
+  assert.ok(st.score >= 3100, `score ${st.score}`);
+  assert.strictEqual(L.missionInfo(st).id, 'target', 'moved on to the next mission');
+  assert.strictEqual(st.mission.progress, 0);
+  assert.strictEqual(st.mission.done, 1);
+});
+
+test('only the active mission counts, and the classic table ignores missions entirely', () => {
+  const st = missionPlay();
+  L.missionHit(st, 'sling');
+  assert.strictEqual(st.mission.progress, 0);
+  const c = missionPlay(0);
+  L.missionHit(c, 'bumper');
+  assert.strictEqual(c.mission, null);
+  assert.strictEqual(c.events.length, 0);
+});
+
+test('the target mission gives a multiball: an extra ball drops in from the top', () => {
+  const st = missionPlay();
+  st.mission.i = 1; st.mission.progress = 0;
+  st.lit = [true, true, false];
+  const tg = L.TARGETS[2];
+  st.ball = { x: (tg.x1 + tg.x2) / 2, y: tg.y1 + 20, vx: 0, vy: -600 };
+  for (let i = 0; i < 80 && !st.extra.length; i++) L.step(st);
+  assert.strictEqual(st.extra.length, 1);
+  assert.ok(st.extra[0].y < 60, 'it starts near the top');
+  assert.ok(st.extra[0].x > 180 && st.extra[0].x < 250, 'right side, like a launched ball');
+  assert.ok(st.extra[0].vx < 0, 'heading left into the table');
+  assert.strictEqual(L.missionInfo(st).id, 'sling');
+  assert.strictEqual(st.multis, 1);
+});
+
+test('extra balls fall like the main ball and cost nothing when they drain', () => {
+  const st = missionPlay();
+  L.spawnExtra(st, 2);
+  assert.strictEqual(st.extra.length, 2);
+  const left = st.ballsLeft;
+  for (let i = 0; i < 240 * 12 && st.extra.length; i++) { st.ball = { x: 150, y: 300, vx: 0, vy: 0 }; L.step(st); }   // 메인 공은 매번 제자리로
+  assert.strictEqual(st.extra.length, 0, 'both fell out');
+  assert.strictEqual(st.ballsLeft, left, 'no ball was lost');
+  assert.strictEqual(st.phase, 'play');
+});
+
+test('when the main ball drains an extra ball takes over; only the last one costs a ball', () => {
+  const st = missionPlay();
+  L.spawnExtra(st, 1);
+  const heir = st.extra[0];
+  st.ball = { x: 150, y: L.H - 5, vx: 0, vy: 600 };
+  for (let i = 0; i < 60; i++) L.step(st);
+  assert.strictEqual(st.ballsLeft, L.BALLS, 'still all balls');
+  assert.strictEqual(st.ball, heir, 'the extra became the main ball');
+  assert.strictEqual(st.extra.length, 0);
+  assert.strictEqual(st.phase, 'play');
+  st.ball = { x: 150, y: L.H - 5, vx: 0, vy: 600 };
+  for (let i = 0; i < 60; i++) L.step(st);
+  assert.strictEqual(st.ballsLeft, L.BALLS - 1, 'now a ball is lost');
+  assert.strictEqual(st.phase, 'ready');
+});
+
+test('a main ball that rolls back into the lane is replaced by an extra instead of freezing the table', () => {
+  const st = missionPlay();
+  L.spawnExtra(st, 1);
+  const heir = st.extra[0];
+  st.ball = { x: L.LANE_X, y: 470, vx: 0, vy: 0 };
+  for (let i = 0; i < 4; i++) L.step(st);
+  assert.strictEqual(st.phase, 'play');
+  assert.strictEqual(st.ball, heir);
+});
+
+test('extra balls are capped and a full cap gives no new ball', () => {
+  const st = missionPlay();
+  assert.strictEqual(L.spawnExtra(st, 10), L.MAX_EXTRA);
+  assert.strictEqual(L.spawnExtra(st, 1), 0);
+  assert.strictEqual(st.extra.length, L.MAX_EXTRA);
+  assert.strictEqual(st.multis, 1, 'the second request made nothing, so it is not counted');
+});
+
+test('missions get harder each round and cycle through all four', () => {
+  for (const m of L.MISSIONS) assert.ok(L.goalOf(m, 3) >= L.goalOf(m, 0));
+  assert.ok(L.goalOf(L.MISSIONS[0], 1) > L.goalOf(L.MISSIONS[0], 0));
+  const st = missionPlay();
+  for (let n = 0; n < L.MISSIONS.length; n++) {
+    const info = L.missionInfo(st);
+    st.mission.progress = info.goal - 1;
+    L.missionHit(st, info.id);
+  }
+  assert.strictEqual(st.mission.i, 0);
+  assert.strictEqual(st.mission.round, 1, 'one full round done');
+  assert.strictEqual(st.mission.done, 4);
+  assert.ok(L.missionInfo(st).goal > L.goalOf(L.MISSIONS[0], 0));
+});
+
+test('mission table games are deterministic too, extra balls included', () => {
+  const play = () => {
+    const st = L.newGame({ table: 1 });
+    L.holdPlunger(st, true); run(st, 0.9); L.holdPlunger(st, false);
+    for (let n = 0; n < 240 * 10; n++) {
+      if (n === 240 * 3) L.spawnExtra(st, 2);
+      L.setFlipper(st, 0, n % 90 < 30); L.setFlipper(st, 1, n % 110 < 40); L.step(st);
+    }
+    return JSON.stringify([st.score, st.ball, st.extra, st.ballsLeft, st.mission, st.lit]);
+  };
+  assert.strictEqual(play(), play());
+});
+
+test('an extra ball resting on a target gets nudged like the main ball', () => {
+  const st = missionPlay();
+  L.spawnExtra(st, 1);
+  const tg = L.TARGETS[1];
+  st.extra[0] = { x: (tg.x1 + tg.x2) / 2, y: tg.y1 - L.BALL_R - 3 - 0.01, vx: 0, vy: 0, stall: 0 };
+  let nudged = false;
+  for (let i = 0; i < 240 * 6 && !nudged; i++) { st.ball = { x: 150, y: 300, vx: 0, vy: 0 }; L.step(st); if (st.events.some((e) => e.type === 'nudge')) nudged = true; st.events.length = 0; }
+  assert.ok(nudged, 'it was shaken loose within six seconds');
+});
+
+test('extra balls spawned in a row all enter the table and none starts inside a wall, bumper or target', () => {
+  for (let k = 0; k < 30; k++) {
+    const st = missionPlay(); st.time = k * 0.37;
+    L.spawnExtra(st, 3);
+    for (const e of st.extra) {
+      for (const bp of st.bumpers) assert.ok(Math.hypot(e.x - bp.x, e.y - bp.y) > bp.r + L.BALL_R, 'not inside a bumper');
+      for (const tg of L.TARGETS) assert.ok(Math.abs(e.y - tg.y1) > L.BALL_R + 3 || e.x > tg.x2 + 10 || e.x < tg.x1 - 10, 'not on a target');
+      assert.ok(e.x > 20 && e.x < 260 && e.y > 15, 'inside the table');
+    }
+  }
+});
